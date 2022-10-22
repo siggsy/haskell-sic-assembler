@@ -17,5 +17,6 @@ halt	J	halt
 
 .	Null terminated string
 in	WORD	C'SIC/XE'
+.	\n
 	BYTE	10
 null	BYTE	X'00'
