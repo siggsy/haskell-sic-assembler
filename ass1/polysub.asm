@@ -21,8 +21,8 @@ poly
 
 .	Register setup
 	LDS	@reg_s
-	SUBR	A, A
-	SUBR	T, T
+	CLEAR	A
+	CLEAR	T
 
 .	+ x^4
 	LDT	#1
