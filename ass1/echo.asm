@@ -163,7 +163,7 @@ num_halt
 	LDA	num_a
 	LDS	num_s
 	LDT	num_t
-	STX	num_x
+	LDX	num_x
 	LDL	num_l
 	RSUB	
 .-------------------------------------------------.
