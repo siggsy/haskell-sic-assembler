@@ -75,6 +75,7 @@ data AssState = AssState
   , _start      :: Int
   , _startName  :: String
   , _end        :: String
+  , _relocation :: Map Int Int
   }
 makeLenses ''AssState
 
@@ -113,7 +114,7 @@ loc = lens getter setter
 fromParsed :: [Parsed] -> Obj
 fromParsed parsed =
   let 
-    (memoryState, finalAss) = runState  (mapM assemble parsed) (AssState "" Map.empty Nothing Map.empty 0 "" "")
+    (memoryState, finalAss) = runState  (mapM assemble parsed) (AssState "" Map.empty Nothing Map.empty 0 "" "" Map.empty)
     finalMemory             = execState (sequence memoryState) (Memory Map.empty (finalAss^.labels) (maximum $ finalAss^.locations))
 
     -- H
@@ -145,14 +146,17 @@ assemble :: Parsed -> State AssState (State Memory ())
 assemble Blank = pure $ pure ()
 
 -- Directive
-assemble ( Directive label directive ) = case directive of
-  BASE location -> pure () <$ (base    .= Just location)
-  NOBASE        -> pure () <$ (base    .= Nothing)
-  START pos     -> pure () <$ (start   .= fromIntegral pos >> startName .= fromJust label)
-  END location  -> pure () <$ (end     .= location)
-  ORG pos       -> pure () <$ (loc     .= fromIntegral pos)
-  USE sect      -> pure () <$ (section .= sect)
-  EQU _         -> undefined
+assemble ( Directive label directive ) = do
+  l <- use loc
+  addLabel label l
+  case directive of
+    BASE location -> pure () <$ (base    .= Just location)
+    NOBASE        -> pure () <$ (base    .= Nothing)
+    START pos     -> pure () <$ (start   .= fromIntegral pos >> startName .= fromJust label)
+    END location  -> pure () <$ (end     .= location)
+    ORG pos       -> pure () <$ (loc     .= fromIntegral pos)
+    USE sect      -> pure () <$ (section .= sect)
+    EQU _         -> undefined
 
 -- Storage directive
 assemble ( Storage label storage ) = do
