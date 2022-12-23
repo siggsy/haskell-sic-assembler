@@ -1,0 +1,56 @@
+cabal-version:      2.4
+name:               ass3
+version:            0.1.0.0
+
+-- A short (one-line) description of the package.
+-- synopsis:
+
+-- A longer description of the package.
+-- description:
+
+-- A URL where users can report bugs.
+-- bug-reports:
+
+-- The license under which the package is released.
+-- license:
+author:             siggsy
+maintainer:         ziga@leskovec.xyz
+
+-- A copyright notice.
+-- copyright:
+-- category:
+extra-source-files: CHANGELOG.md
+build-type: Simple
+
+executable ass3
+    main-is:          Main.hs
+
+    -- Modules included in this executable, other than Main.
+    other-modules: 
+        Parsers.Data
+      , Parsers.Parser
+      , Parsers.Instruction
+      , Parsers.Common
+      , Assembler.Assembler
+
+    -- LANGUAGE extensions used by modules in this package.
+    -- other-extensions:
+    build-depends: 
+        base
+      , lens
+      , megaparsec
+      , text
+      , containers
+      , mtl
+    
+    default-extensions:
+        OverloadedStrings
+      , TemplateHaskell
+    
+
+    hs-source-dirs: app, src
+
+    
+    -- other-modules: Parsers.Parser, Assembler.Assembler
+
+    default-language: Haskell2010
