@@ -4,6 +4,7 @@ import Parsers.Parser
 import Assembler.Assembler
 
 import Text.Megaparsec
+import System.Environment
 
 initialState :: String -> Int -> s -> State s e
 initialState src tabWidth s = State
@@ -27,11 +28,12 @@ run p input = snd $ runParser' p $ initialState "" 4 input
 
 main :: IO ()
 main = do
-    input <- readFile "echo.asm"
-    let parsed = run ass input
-    case parsed of
-        Left e -> putStrLn (errorBundlePretty e)
+    (file : _) <- getArgs
+    let withoutExtension = takeWhile (/= '.')
+    input <- readFile file
+    case run ass input of
+        Left e -> putStrLn $ errorBundlePretty e
         Right m -> do
             mapM_ print m
             let obj = fromParsed m
-            putStrLn (toRaw obj)
+            writeFile (withoutExtension file ++ ".obj") (toRaw obj)
