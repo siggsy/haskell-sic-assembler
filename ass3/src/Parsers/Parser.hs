@@ -10,6 +10,7 @@ module Parsers.Parser
   , Storage (RESB, RESW, BYTE, WORD)
   , Data (Bytes, Num)
   , Directive (BASE, NOBASE, START, END, ORG, USE, EQU)
+  , Exp
   , Instruction (F1, F2, F3, F4)
   , regAsNum
   ) 
@@ -46,20 +47,20 @@ import Control.Lens
 -----------------------------------------
 
 data Storage
-  = RESB Word
-  | RESW Word
+  = RESB Exp
+  | RESW Exp
 
   | BYTE Data
   | WORD Data
   deriving Show
 
 data Directive
-  = BASE String
+  = BASE Exp
   | NOBASE
   | START Word
-  | END String
-  | ORG Word
-  | EQU String
+  | END Exp
+  | ORG Exp
+  | EQU Exp
 
   | CSECT String
   | USE String
@@ -98,27 +99,63 @@ isBlank _     = False
 -- Parser combinators -------------------
 -----------------------------------------
 
+data Exp 
+  = Star
+  | Val Int
+  | Var String
+  | Mul Exp Exp
+  | Div Exp Exp
+  | Plus Exp Exp
+  | Minus Exp Exp
+  deriving Show
+
+term :: Parser Exp
+term = (Val <$> try integer <?> "integer")
+  <|> (Var <$> try identifier <?> "identifier")
+  <|> (Star <$  lexeme (char' '*') <?> "star")
+  <|> parenthesised expression
+
+parenthesised :: Parser a -> Parser a
+parenthesised = between (char' '(') (char' ')')
+
+expression :: Parser Exp
+expression = do
+  n <- term
+  rest <- optional $ choice
+    [ Minus <$> try minus <?> "minus"
+    , Plus  <$> try plus  <?> "plus"
+    , Mul   <$> try mul   <?> "mul"
+    , Div   <$> try div   <?> "div"
+    ]
+  pure $ maybe n ($ n) rest
+  where
+    around c = (lexeme (char' c) <?> "operator") *> expression
+    plus  = around '+'
+    minus = around '-'
+    mul   = around '*'
+    div   = around '/'
+
 directive :: Parser Directive
 directive = identifier >>= \case
   "NOBASE"  -> pure NOBASE
-  "BASE"    -> BASE  <$> identifier
-  "END"     -> END   <$> identifier
+  "BASE"    -> BASE  <$> expression
+  "END"     -> END   <$> expression
   "START"   -> START <$> natural
-  "ORG"     -> ORG   <$> natural
+  "ORG"     -> ORG   <$> expression
   "USE"     -> USE   <$> identifier0
-  "EQU"     -> undefined -- TODO: Parse expression
+  "EQU"     -> EQU   <$> expression
   _         -> fail "Unknown directive"
 
 storage :: Parser Storage
 storage = identifier >>= \case
-  "RESB" -> RESB <$> natural
-  "RESW" -> RESW <$> natural
+  "RESB" -> RESB <$> expression
+  "RESW" -> RESW <$> expression
   "BYTE" -> BYTE <$> rawData 1
   "WORD" -> WORD <$> rawData 3
   _      -> fail "Unknown storage directive"
 
 labeled :: (Labelable a, Show a) => Parser a -> Parser (Maybe String, a)
-labeled a = do
+labeled a = dbg "labeled" $ do
     _label <- label <?> "label"
     let l = if null _label
         then Nothing

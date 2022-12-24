@@ -81,7 +81,7 @@ label = try label' <|> (whiteSpace >> pure "")
       pure $ map toUpper (c:cs)
 
 identStart :: Parser Char
-identStart = letterChar <|> char '_'
+identStart = letterChar <|> char '_' <|> char '+'
 
 identRest :: Parser Char
 identRest = alphaNumChar <|> char '_'

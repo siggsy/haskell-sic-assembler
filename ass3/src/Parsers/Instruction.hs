@@ -93,6 +93,9 @@ instructions =
 
   , ("ADD",   0x18, MnemonicF34O)
   , ("ADDF",  0x58, MnemonicF34O)
+  , ("SUB",   0x1C, MnemonicF34O)
+  , ("SUBF",  0x5C, MnemonicF34O)
+  , ("OR",    0x44, MnemonicF34O)
   , ("AND",   0x40, MnemonicF34O)
   , ("COMP",  0x28, MnemonicF34O)
   , ("COMPF", 0x88, MnemonicF34O)
@@ -123,6 +126,7 @@ instructions =
 
   -- F2
   , ("ADDR",    0x90, MnemonicF2RR)
+  , ("SUBR",    0x94, MnemonicF2RR)
   , ("CLEAR",   0xB4, MnemonicF2R)
   , ("COMPR",   0xA0, MnemonicF2RR)
   , ("DIVR",    0x9C, MnemonicF2RR)
@@ -165,13 +169,14 @@ instruction :: Parser Instruction
 instruction = do
   mnemonic <- try identifier <?> "mnemonic"
   let
-    prefix   = head mnemonic
+    (prefix : rest) = mnemonic
+    mnemonic' = if isF4 then rest else mnemonic
     isF4     = prefix == '+'
     f34      = if isF4 then F4 else F3
     f34Range = if isF4 then 20 else 15
 
-  case mnemonicMap !? mnemonic of
-    Nothing -> fail ("Unknown mnemonic " ++ mnemonic)
+  case mnemonicMap !? mnemonic' of
+    Nothing -> fail ("Unknown mnemonic " ++ mnemonic')
     Just (oc, format) -> if isF4 && format /= MnemonicF34O
       then fail "Expected F3/F4 mnemonic"
       else case format of
