@@ -5,6 +5,7 @@ import Assembler.Assembler
 
 import Text.Megaparsec
 import System.Environment
+import Data.List
 
 initialState :: String -> Int -> s -> State s e
 initialState src tabWidth s = State
@@ -34,6 +35,7 @@ main = do
     case run ass input of
         Left e -> putStrLn $ errorBundlePretty e
         Right m -> do
-            mapM_ print m
             let obj = fromParsed m
+                lst = intercalate "\n" (map show m)
+            writeFile (withoutExtension file ++ ".lst") lst
             writeFile (withoutExtension file ++ ".obj") (toRaw obj)

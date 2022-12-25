@@ -41,6 +41,7 @@ executable ass3
       , megaparsec
       , text
       , containers
+      , tardis
       , mtl
     
     default-extensions:

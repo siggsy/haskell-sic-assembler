@@ -10,7 +10,7 @@ module Parsers.Parser
   , Storage (RESB, RESW, BYTE, WORD)
   , Data (Bytes, Num)
   , Directive (BASE, NOBASE, START, END, ORG, USE, EQU)
-  , Exp
+  , Exp (Star, Val, Var, Mul, Div, Plus, Minus)
   , Instruction (F1, F2, F3, F4)
   , regAsNum
   ) 
@@ -73,7 +73,14 @@ data Parsed
   | Instruction (Maybe String) Instruction
   | Directive (Maybe String) Directive
   | Storage (Maybe String) Storage
-  deriving Show
+
+instance Show Parsed where
+  show :: Parsed -> String
+  show Blank = ""
+  show (Instruction lbl ins) = maybe "\t" (("\n" ++).(++ "\n\t")) lbl ++ show ins
+  show (Directive lbl dir) = maybe "\t" (("\n" ++).(++ "\n\t")) lbl ++ show dir
+  show (Storage lbl str) = maybe "\t" (("\n" ++).(++ "\n\t")) lbl ++ show str
+  
 
 class Labelable a where
   requiresLabel :: a -> Bool
@@ -155,7 +162,7 @@ storage = identifier >>= \case
   _      -> fail "Unknown storage directive"
 
 labeled :: (Labelable a, Show a) => Parser a -> Parser (Maybe String, a)
-labeled a = dbg "labeled" $ do
+labeled a = do
     _label <- label <?> "label"
     let l = if null _label
         then Nothing

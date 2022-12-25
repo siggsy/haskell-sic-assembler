@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE InstanceSigs #-}
 
 module Parsers.Instruction where
 import Parsers.Common
@@ -31,7 +32,13 @@ data Instruction
   | F2 Word Register Register
   | F3 Word Operand Bool
   | F4 Word Operand Bool
-  deriving Show
+
+instance Show Instruction where
+  show :: Instruction -> String
+  show (F1 op) = fst $ opMap Map.! op
+  show (F2 op reg1 reg2) = fst (opMap Map.! op) ++ "\t" ++ show reg1 ++ "," ++ show reg2
+  show (F3 op operand isX) = fst (opMap Map.! op) ++ "\t" ++ show operand ++ if isX then ", X" else ""
+  show (F4 op operand isX) = "+" ++ show (F3 op operand isX) 
 
 data Format
   = MnemonicF1
@@ -67,8 +74,14 @@ isLabel _         = False
 firstAsKey :: (a,b,c) -> (a,(b,c))
 firstAsKey (a,b,c) = (a,(b,c))
 
+secondAsKey :: (a,b,c) -> (b,(a,c))
+secondAsKey (a,b,c) = (b,(a,c))
+
 mnemonicMap :: Map String (Word, Format)
 mnemonicMap = Map.fromList $ map firstAsKey instructions
+
+opMap :: Map Word (String, Format)
+opMap = Map.fromList $ map secondAsKey instructions
 
 instructions :: [(String, Word, Format)]
 instructions =

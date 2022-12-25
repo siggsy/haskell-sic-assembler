@@ -1,11 +1,13 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE TupleSections #-}
 
 module Assembler.Assembler where
 import Parsers.Parser
 
 import Control.Lens
 import Control.Monad.State
+import Control.Monad.Tardis
 import Data.Maybe
 import Data.List
 
@@ -33,10 +35,12 @@ makeLenses ''Nixbpe
 
 data H    = H String Int Int  deriving Show
 data T    = T Int Int [Word8]
+data M    = M Int Int         deriving Show
 newtype E = E Int             deriving Show
 data Obj = Obj
   { _hSect :: H
   , _tSect :: [T]
+  , _mSect :: [M]
   , _eSect :: E
   }
 makeLenses ''Obj
@@ -50,7 +54,7 @@ instance Show Obj where
   show obj = show (obj^.hSect) ++ "\n" ++ intercalate "\n" (map show (obj^.tSect)) ++ "\n" ++ show (obj^.eSect)
 
 toRaw :: Obj -> String
-toRaw obj = intercalate "\n" $ header : tRecords ++ [end]
+toRaw obj = intercalate "\n" $ header : tRecords ++ mRecords ++ [end]
   where
     header = let
       (H name start len) = obj^.hSect
@@ -61,27 +65,43 @@ toRaw obj = intercalate "\n" $ header : tRecords ++ [end]
       tRecord (T loc len bytes) = printf "T%06X%02X" loc len ++ concatMap (printf "%02X") bytes
       in map tRecord ts
     
+    mRecords = let
+      ms = obj^.mSect
+      mRecord (M loc len) = printf "T%06X%01X" loc len
+      in map mRecord ms
+
     end = let
       (E start) = obj^.eSect
       in printf "E%06X" start
-      
 
+type SInt = (Int, Int)
+instance (Num a, Num b) => Num (a, b) where
+  (+) :: (Num a, Num b) => (a, b) -> (a, b) -> (a, b)
+  (+) a = bimap (fst a +) (snd a +)
+  (*) :: (Num a, Num b) => (a, b) -> (a, b) -> (a, b)
+  (*) a = bimap (fst a *) (snd a *)
+  abs :: (Num a, Num b) => (a, b) -> (a, b)
+  abs = bimap abs abs
+  signum :: (Num a, Num b) => (a, b) -> (a, b)
+  signum = bimap signum signum
+  fromInteger :: (Num a, Num b) => Integer -> (a, b)
+  fromInteger i = (fromInteger i, 0) 
+  negate :: (Num a, Num b) => (a, b) -> (a, b)
+  negate = bimap negate negate
 
 data AssState = AssState
   { _section    :: String
-  , _locations  :: Map String Int
-  , _base       :: Maybe String
-  , _labels     :: Map String Int
+  , _locations  :: Map String SInt
+  , _base       :: Maybe SInt
   , _start      :: Int
   , _startName  :: String
-  , _end        :: String
-  , _relocation :: Map Int Int
+  , _end        :: Int
   }
 makeLenses ''AssState
 
 data Memory = Memory
-  { _memory        :: Map Int [Word8]
-  , _finalLabels   :: Map String Int
+  { _memory        :: Map SInt [Word8]
+  , _relocation :: Map Int Int
   , _programLength :: Int
   }
 makeLenses ''Memory
@@ -97,33 +117,38 @@ tFromMap memory = go (Map.toAscList memory)
       len = length bytes'
       in T address len bytes' : go rest
 
-addLabel :: (Zoom m n (Map String Int) AssState, Functor (Zoomed m ())) => Maybe [Char] -> Int -> n ()
-addLabel label location = zoom labels ( case label of
-    Just label -> at label ?= location
-    Nothing    -> pure () )
+-- addLabel :: (Zoom m n (Map String Int) AssState, Functor (Zoomed m ())) => Maybe [Char] -> Int -> n ()
+addLabel :: At t => Maybe (Index t) -> IxValue t -> t -> t
+addLabel label location = case label of
+    Just label -> at label ?~ location
+    Nothing    -> id
 
-loc :: Lens' AssState Int
+loc :: Lens' AssState SInt
 loc = lens getter setter
   where
-    getter :: AssState -> Int
-    getter s = fromMaybe 0 $ s ^. (locations . at (s ^. section))
+    getter :: AssState -> SInt
+    getter s = fromMaybe (0,1) $ s ^. (locations . at (s ^. section))
 
-    setter :: AssState -> Int -> AssState
+    setter :: AssState -> SInt -> AssState
     setter s val = s { _locations = Map.insert (s^.section) val (s^.locations) }
 
 fromParsed :: [Parsed] -> Obj
 fromParsed parsed =
   let 
-    (memoryState, finalAss) = runState  (mapM assemble parsed) (AssState "" Map.empty Nothing Map.empty 0 "" "" Map.empty)
-    finalMemory             = execState (sequence memoryState) (Memory Map.empty (finalAss^.labels) (maximum $ finalAss^.locations))
+    t                       = runStateT (mapM assemble parsed) (AssState "" Map.empty Nothing 0 "" 0)
+    (memoryState, finalAss) = evalTardis t (Map.empty, Map.empty)
+    finalMemory             = execState (sequence memoryState) (Memory Map.empty Map.empty (sum . Map.map fst $ finalAss^.locations))
 
     -- H
     programName = finalAss^.startName
     codeAddress = finalAss^.start
     codeLength  = finalMemory^.programLength
+
+    -- M
+    mChunks = map (uncurry M) (Map.toList $ finalMemory^.relocation)
     
     -- E
-    executionStart = fromMaybe 0 $ finalAss^.labels.at (finalAss^.end)
+    executionStart = finalAss^.end
 
     splitT :: T -> [T]
     splitT t@(T addr length bytes)
@@ -133,43 +158,87 @@ fromParsed parsed =
       | otherwise   = [t]
 
     -- T
-    tChunks = tFromMap (finalMemory^.memory)
+    tChunks = tFromMap (Map.mapKeysMonotonic fst $ finalMemory^.memory)
 
+    -- M
   in Obj 
     (H programName codeAddress codeLength)
     tChunks
+    mChunks
     (E executionStart)
 
-assemble :: Parsed -> State AssState (State Memory ())
+type SymTable = Map String SInt
+
+evaluateExpression :: SInt -> SymTable -> Exp -> SInt
+evaluateExpression addr table exp = case exp of
+  Val val     -> (val, 0)
+  Var var     -> table Map.! var
+  Mul e1 e2   -> elemWise (*) (eval e1) (eval e2)
+  Div e1 e2   -> elemWise div (eval e1) (eval e2)
+  Plus e1 e2  -> elemWise (+) (eval e1) (eval e2)
+  Minus e1 e2 -> elemWise (-) (eval e1) (eval e2)
+  Star        -> addr
+  where
+    eval = evaluateExpression addr table
+    elemWise op (a, aS) (b, bS) = (a `op` b, aS `op` bS)
+
+requireStartDependent :: SInt -> Int
+-- requireStartDependent sint | trace ("sint: " ++ show sint ++ "\n") False = undefined 
+requireStartDependent (v,s) = v
+
+requireStartIndependent :: SInt -> Int
+requireStartIndependent (v,s) = if s /= 0
+  then error "Trying to use start depenent value as a constant"
+  else v
+
+assemble :: Parsed -> StateT AssState (Tardis SymTable SymTable) (State Memory ())
 
 -- Blank line
 assemble Blank = pure $ pure ()
 
 -- Directive
 assemble ( Directive label directive ) = do
+  bw <- lift getFuture
+  fw <- lift getPast
+
   l <- use loc
-  addLabel label l
+  let table = Map.union bw fw
+
   case directive of
-    BASE location -> pure () <$ (base    .= Just location)
-    NOBASE        -> pure () <$ (base    .= Nothing)
-    START pos     -> pure () <$ (start   .= fromIntegral pos >> startName .= fromJust label)
-    END location  -> pure () <$ (end     .= location)
-    ORG pos       -> pure () <$ (loc     .= fromIntegral pos)
-    USE sect      -> pure () <$ (section .= sect)
-    EQU _         -> undefined
+    EQU exp -> let eval = evaluateExpression l table exp in do
+      lift $ modifyBackwards (addLabel label eval)
+      lift $ modifyForwards (addLabel label eval)
+    _ -> do
+      lift $ modifyBackwards (addLabel label l)
+      lift $ modifyForwards (addLabel label l)
+
+  case directive of
+    BASE exp  -> pure () <$ (base    ?= evaluateExpression l table exp)
+    NOBASE    -> pure () <$ (base    .= Nothing)
+    START pos -> pure () <$ (start   .= fromIntegral pos >> startName .= fromJust label)
+    END exp   -> pure () <$ (end     .= fst (evaluateExpression l table exp))
+    ORG exp   -> pure () <$ (loc     .= evaluateExpression l table exp)
+    USE sect  -> pure () <$ (section .= sect)
+    EQU _     -> pure $ pure ()
 
 -- Storage directive
 assemble ( Storage label storage ) = do
+  bw <- lift getFuture
+  fw <- lift getPast
+
   l <- use loc
-  addLabel label l
+  let table = Map.union bw fw
+
+  lift $ modifyBackwards (addLabel label l)
+  lift $ modifyForwards (addLabel label l)
   case storage of
-    RESB size -> pure () <$ (loc += fromIntegral size)
-    RESW size -> pure () <$ (loc += 3 * fromIntegral size)
+    RESB exp -> pure () <$ (loc += evaluateExpression l table exp)
+    RESW exp -> pure () <$ (loc += (3,3) * evaluateExpression l table exp)
     BYTE d -> case d of
       Bytes h -> do
         l <- use loc
         loc += fromIntegral (length h)
-        pure $ memory %= Map.union (Map.fromList (zip [l..] (map (:[]) h)))
+        pure $ memory %= Map.union (Map.fromList (zip (map (,snd l) [fst l..]) (map (:[]) h)))
       
       Num n -> do
         l <- use loc
@@ -180,7 +249,7 @@ assemble ( Storage label storage ) = do
       Bytes h -> do
         l <- use loc
         loc += fromIntegral (length h)
-        pure $ memory %= Map.union (Map.fromList (zip [l..] (chunksOf 3 h)))
+        pure $ memory %= Map.union (Map.fromList (zip (map (,snd l) [fst l..]) (chunksOf 3 h)))
       Num n -> do
         l <- use loc
         loc += 3
@@ -198,14 +267,16 @@ assemble ( Storage label storage ) = do
 -- F1 instruction
 assemble ( Instruction label ( F1 op ) ) = do
   l <- use loc
-  addLabel label l
+  lift $ modifyBackwards (addLabel label l)
+  lift $ modifyForwards (addLabel label l)
   loc += 1
   pure $ zoom memory $ at l ?= [op^.byteAt 0]
 
 -- F2 instruction
 assemble ( Instruction label ( F2 op r1 r2 ) ) = do
   l <- use loc
-  addLabel label l
+  lift $ modifyBackwards (addLabel label l)
+  lift $ modifyForwards (addLabel label l)
   loc += 2
   pure $ zoom memory $ do
     at l ?= [ op^.byteAt 0, (regAsNum r1 .<<. 4 .|. regAsNum r2)^.byteAt 0 ] 
@@ -216,14 +287,21 @@ assemble ( Instruction label f34 ) = do
     (op, operand, isX, isExtended) = case f34 of
       F3 op operand isX -> (op, operand, isX, False)
       F4 op operand isX -> (op, operand, isX, True)
+
   l <- use loc
   _base <- use base
-  addLabel label l
+  lift $ modifyBackwards (addLabel label l)
+  lift $ modifyForwards (addLabel label l)
+
+  bw <- lift getFuture
+  fw <- lift getPast
+
+  let symtable = Map.union bw fw
+
   loc += if isExtended then 4 else 3
   l' <- use loc
   pure $ do
     len     <- use programLength
-    _labels <- use finalLabels
     let
       opWithNi =
         op 
@@ -231,9 +309,9 @@ assemble ( Instruction label f34 ) = do
         & bitAt 0 .~ nixbpe^.i
 
       xbpeWithOffset =
-        if isExtended 
+        (if isExtended 
           then address .>>. 16 
-          else address .>>. 8
+          else address .>>. 8)
         &~ do
           bitAt 7 .= nixbpe^.x
           bitAt 6 .= nixbpe^.b
@@ -247,28 +325,21 @@ assemble ( Instruction label f34 ) = do
 
       f4Tail = address
 
-      resolveSymbol :: Symbol -> Int
-      resolveSymbol ( Constant int ) = int
-      resolveSymbol ( Label s )      = case _labels^.at s of
-        Nothing  -> error ("Undefined symbol " ++ s)
-        Just int -> int
-
-      resolveLabel :: String -> Int
-      resolveLabel s = resolveSymbol ( Label s )
-
-      baseAddress = resolveLabel <$> _base
-      ((nixbpe, address), storeOperand) = case operand of
-        NoOperand          -> ((Nixbpe True True False False False False, 0), pure())
-        Immediate symbol   -> (resolveAddressing I  baseAddress isX isExtended (resolveSymbol symbol) l', pure ())
-        Simple symbol      -> (resolveAddressing S  baseAddress isX isExtended (resolveSymbol symbol) l', pure ())
-        Indirect symbol    -> (resolveAddressing In baseAddress isX isExtended (resolveSymbol symbol) l', pure ())
-        Annonymous integer -> (resolveAddressing S  baseAddress isX isExtended len l', do
-          programLength += l' - l
-          zoom memory $ at len ?=
+      requiresRelocation = sAddress /= 0
+      (nixbpe, (address, sAddress)) = resolveAddressing f34 symtable _base l' len
+      storeOperand       = case operand of
+        Annonymous integer -> do
+          programLength += fst (l' - l)
+          zoom memory $ at (len,1) ?=
               [ integer^.byteAt 2
               , integer^.byteAt 1
               , integer^.byteAt 0
-              ])
+              ]
+        _ -> pure ()
+    
+    when requiresRelocation $ do
+      zoom relocation $ do
+        at (fst l+1) ?= if isExtended then 6 else 5 
 
     storeOperand
     zoom memory $ do
@@ -278,39 +349,71 @@ assemble ( Instruction label f34 ) = do
         , offsetTail ^.byteAt 0
         ] ++ [f4Tail^.byteAt 0 | isExtended])
 
-data Addressing = I | S | In
+resolveAddressing :: Instruction -> SymTable -> Maybe SInt -> SInt -> Int -> (Nixbpe, SInt)
+resolveAddressing instruction symtable base location len = let
 
-resolveAddressing :: Addressing -> Maybe Int -> Bool -> Bool -> Int -> Int -> (Nixbpe, Int)
-resolveAddressing addressing base isX isExtended address location = case addressing of
-  I -> (Nixbpe False True False False False isExtended, address)
+  resolveSymbol :: Symbol -> SInt
+  resolveSymbol ( Constant int ) = (int, 0)
+  resolveSymbol ( Label s )      = case symtable^.at s of
+    Nothing  -> error ("Undefined symbol " ++ s)
+    Just int -> int
+  
+  (op, operand, isX, isExtended) = case instruction of
+    F3 op operand isX -> (op, operand, isX, False)
+    F4 op operand isX -> (op, operand, isX, True)
+    _                 -> error "Can only resolve addressing for F3 and F4 instructions"
+  
+  isConstant = snd address == 0
+  ((n,i), address) = case operand of
+    NoOperand    -> ((True,  True),  (0,0))
+    Simple s     -> ((True,  True),  resolveSymbol s)
+    Immediate s  -> ((False, True),  resolveSymbol s)
+    Indirect s   -> ((True,  False), resolveSymbol s)
+    Annonymous _ -> ((True,  True),  (len,1))
 
-  S -> case msum $ [ f True True isX isExtended base address location | f <- [tryPC, tryBASE, tryDIRECT] ] of
+  in case msum $ [ f n i isX isExtended base address location | f <- [tryCONSTANT, tryPC, tryBASE, tryDIRECT] ] of
     Nothing -> error "Could not address symbol"
     Just res -> res
 
-  In -> case msum $ [ f True False isX isExtended base address location | f <- [tryPC, tryBASE, tryDIRECT] ] of
-    Nothing -> error "Could not address symbol"
-    Just res -> res
+tryCONSTANT :: Bool -> Bool -> Bool -> Bool -> Maybe SInt -> SInt -> SInt -> Maybe (Nixbpe, SInt)
+tryCONSTANT n i isX isExtended base (addr, saddr) location
+  | saddr /= 0 = Nothing
+  | otherwise = let
+    inRange = if isExtended
+      then addr >= -2^19 && addr <= 2^19-1
+      else addr >= -2^11 && addr <= 2^11-1
+    in if inRange
+      then Just (Nixbpe n i isX False False isExtended, (addr, 0))
+      else Nothing
 
-tryPC :: Bool -> Bool -> Bool -> Bool -> Maybe Int -> Int -> Int -> Maybe (Nixbpe, Int)
+tryPC :: Bool -> Bool -> Bool -> Bool -> Maybe SInt -> SInt -> SInt -> Maybe (Nixbpe, SInt)
 tryPC n i isX isExtended base address location
   | isExtended                       = Nothing
   | let 
-      diff = address - location
+      (diff, sDiff) = address - location
     in diff > 2^11-1 || diff < -2^11 = Nothing
-  | otherwise                        = Just (Nixbpe n i isX False True False, (address - location) .&. 0x3FFF)
+  | otherwise                        = let 
+    (diff, sDiff) = address - location
+    in Just (Nixbpe n i isX False True False, (diff .&. 0xFFF, sDiff))
 
-tryBASE :: Bool -> Bool -> Bool -> Bool -> Maybe Int -> Int -> Int -> Maybe (Nixbpe, Int)
-tryBASE n i isX isExtended base address location = case base of
-  Nothing -> Nothing
-  Just b  -> 
-    let diff = address - b
-        size = if isExtended then 2^20-1 else 2^12-1
-    in if diff < 0 || diff > size
-      then Nothing
-      else Just (Nixbpe n i isX True False False, diff .&. 0x3FFFFF)
+tryBASE :: Bool -> Bool -> Bool -> Bool -> Maybe SInt -> SInt -> SInt -> Maybe (Nixbpe, SInt)
+tryBASE n i isX isExtended base address location
+  | isExtended = Nothing
+  | otherwise =
+    case base of
+      Nothing -> Nothing
+      Just b  -> 
+        let (diff, sDiff) = address - b
+            size = if isExtended then 2^20-1 else 2^12-1
+            mask = if isExtended then 0xFFFFF else 0xFFF
+        in if diff < 0 || diff > size
+          then Nothing
+          else Just (Nixbpe n i isX True False isExtended, (diff .&. mask, sDiff))
 
-tryDIRECT :: Bool -> Bool -> Bool -> Bool -> Maybe Int -> Int -> Int -> Maybe (Nixbpe, Int)
-tryDIRECT n i isX isExtended base address location
-  | location > 2^15-1 = Nothing
-  | otherwise         = Just (Nixbpe False False isX False False False, address)
+tryDIRECT :: Bool -> Bool -> Bool -> Bool -> Maybe SInt -> SInt -> SInt -> Maybe (Nixbpe, SInt)
+tryDIRECT n i isX isExtended base (address,sAddress) location
+  | isExtended = if fst location < 2^20 
+    then Just (Nixbpe n i False False False True, (address .&. 0xFFFFF, sAddress)) 
+    else Nothing
+  | fst location > 2^15-1 = Nothing
+  | otherwise         = Just (Nixbpe False False isX False False False, (address .&. 0x3FFF, sAddress))
