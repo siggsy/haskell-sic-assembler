@@ -1,0 +1,5 @@
+dist-newstyle
+sictools.jar
+*.obj
+*.lst
+*.log
